@@ -13,7 +13,7 @@ class FlutterUdid {
   /// Android: 8af8770a27cfd182
   static Future<String> get udid async {
     final String udid = await _channel.invokeMethod('getUDID');
-    return udid;
+    return udid.trim();
   }
 
   /// Returns the UDID in a consistent format for all platforms.

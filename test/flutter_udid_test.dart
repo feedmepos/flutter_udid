@@ -7,21 +7,62 @@ void main() {
 
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  setUp(() {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (MethodCall methodCall) async {
-      return '42';
+  group("default test", () {
+    setUp(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
+        return '42';
+      });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    test('getUDID', () async {
+      expect(await FlutterUdid.udid, '42');
+    });
+
+    test('getConsistentUDID', () async {
+      expect(await FlutterUdid.consistentUdid,
+          '73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049');
     });
   });
 
-  tearDown(() {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+  group("trim whitespace", () {
+    setUp(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
+        return '42      ';
+      });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    test('getUDID', () async {
+      expect(await FlutterUdid.udid, '42');
+    });
   });
 
-  test('getUDID', () async {
-    expect(await FlutterUdid.udid, '42');
-  });
+  group("trim breakline", () {
+    setUp(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
+        return '42    \n\n\n';
+      });
+    });
 
-  test('getConsistentUDID', () async {
-    expect(await FlutterUdid.consistentUdid, '73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049');
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    test('getUDID', () async {
+      expect(await FlutterUdid.udid, '42');
+    });
   });
 }
