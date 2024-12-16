@@ -1,5 +1,13 @@
 # flutter_udid
 
+## Reason why this is forked
+1. Original repo has higher dart version constraint.
+2. With just Windows UUID logic, there are duplicate id.
+    > PCs have SMBIOS data containing small amount of identifying information. 
+   > One piece of information in this SMBIOS data is the universally unique identifier. 
+   > Some PC and motherboard manufacturers fail to set this, often leaving the UUID set to 03000200-0400-0500-0006-000700080009.
+3. As of now, this is not intended to be merged back to original repo due to these changes are defined to be specific requirement only.
+
 [![pub package](https://img.shields.io/pub/v/flutter_udid.svg)](https://pub.dartlang.org/packages/flutter_udid)
 
 Plugin to retrieve a persistent UDID across app reinstalls on iOS, Android, Mac, Windows & Linux.
