@@ -11,76 +11,128 @@ class WindowsUDID {
   static String? _uniqueId;
   static final _logger = Logger("flutter_udid");
 
-  /// A unique device identifier that matches Unity's implementation.
-  ///
-  /// Uses the same hardware classes as Unity's SystemInfo.deviceUniqueIdentifier:
-  /// - Win32_BaseBoard::SerialNumber
-  /// - Win32_BIOS::SerialNumber (via Win32_ComputerSystemProduct::UUID)
-  /// - Win32_Processor::ProcessorId
-  /// - Win32_DiskDrive::SerialNumber
-  /// - Win32_OperatingSystem::SerialNumber
+  /// Returns a stable unique ID.
+  /// Priority:
+  /// 1. Legacy WMIC (backward-compatible with old devices)
+  /// 2. Unity-compatible PowerShell implementation
+  /// 3. MachineGuid registry (final fallback)
   static Future<String> uniqueIdentifier() async {
     if (_uniqueId != null && _uniqueId!.isNotEmpty) {
       return _uniqueId!;
     }
 
-    // Exact same hardware classes as Unity, but using modern PowerShell
-    final baseBoardID = await _getBaseBoardSerial();
-    final biosID = await _getBiosSerial();
-    final processorID = await _getProcessorId();
-    final diskDriveID = await _getDiskDriveSerial();
-    final osNumber = await _getOSSerial();
+    // --- OLD IMPLEMENTATION (wmic) ---
+    final legacyId = await _legacyIdentifier();
+    if (legacyId.isNotEmpty) {
+      _logger.info("Using legacy UDID (backward-compatible).");
+      _uniqueId = legacyId;
+      return _uniqueId!;
+    }
 
-    // Unity concatenates these directly (no separators)
-    final all = baseBoardID + biosID + processorID + diskDriveID + osNumber;
+    // --- NEW IMPLEMENTATION (PowerShell/Unity style) ---
+    final unityId = await _unityIdentifier();
+    if (unityId.isNotEmpty) {
+      _logger.info("Using Unity-compatible UDID (new).");
+      _uniqueId = unityId;
+      return _uniqueId!;
+    }
 
-    // Use SHA-256 like Unity (Unity actually uses a proprietary hash, but SHA-256 is close)
-    final uID = sha256.convert(utf8.encode(all)).toString();
-
-    _logger.info("Unity-compatible UDID generated");
-    _logger.fine(
-        "Hardware components - BaseBoard: '${baseBoardID.isEmpty ? 'EMPTY' : 'Found'}', "
-        "BIOS: '${biosID.isEmpty ? 'EMPTY' : 'Found'}', "
-        "Processor: '${processorID.isEmpty ? 'EMPTY' : 'Found'}', "
-        "DiskDrive: '${diskDriveID.isEmpty ? 'EMPTY' : 'Found'}', "
-        "OS: '${osNumber.isEmpty ? 'EMPTY' : 'Found'}', "
-        "Combined length: ${all.length}, "
-        "UDID: ${uID.substring(0, 8)}...");
-
-    _uniqueId = uID;
+    // --- FINAL FALLBACK: MachineGuid ---
+    final guid = await _machineGuidFallback();
+    _logger.warning(
+        "Both legacy & Unity UDID failed. Using MachineGuid fallback.");
+    _uniqueId = guid;
     return _uniqueId!;
   }
 
-  /// Win32_BaseBoard::SerialNumber
-  static Future<String> _getBaseBoardSerial() async {
-    return _queryWMI("Win32_BaseBoard", "SerialNumber");
+  /// Original implementation (matches bb0ad9... style IDs).
+  static Future<String> _legacyIdentifier() async {
+    try {
+      final baseBoardID = await _fetchWinID(
+          "wmic", ["baseboard", "get", "serialnumber"], "serialnumber");
+      final biosID =
+          await _fetchWinID("wmic", ["csproduct", "get", "uuid"], "uuid");
+      final processorID = await _fetchWinID(
+          "wmic", ["cpu", "get", "processorid"], "processorid");
+      final diskDriveID = await _fetchWinID(
+          "wmic", ["diskdrive", "get", "serialnumber"], "serialnumber");
+      final osNumber = await _fetchWinID(
+          "wmic", ["os", "get", "serialnumber"], "serialnumber");
+
+      final all = baseBoardID + biosID + processorID + diskDriveID + osNumber;
+      if (all.isNotEmpty) {
+        return sha256.convert(utf8.encode(all)).toString();
+      }
+    } catch (e) {
+      _logger.warning("Legacy WMIC UDID failed: $e");
+    }
+    return "";
   }
 
-  /// Win32_BIOS::SerialNumber (Unity actually uses Win32_ComputerSystemProduct::UUID)
-  static Future<String> _getBiosSerial() async {
-    // Unity uses UUID from ComputerSystemProduct, not BIOS SerialNumber
-    return _queryWMI("Win32_ComputerSystemProduct", "UUID");
-  }
-
-  /// Win32_Processor::ProcessorId
-  static Future<String> _getProcessorId() async {
-    // Get first processor's ID
-    return _queryWMI("Win32_Processor", "ProcessorId", selectFirst: true);
-  }
-
-  /// Win32_DiskDrive::SerialNumber
-  static Future<String> _getDiskDriveSerial() async {
-    // Get first physical disk's serial number
-    return _runPowerShellQuery(
+  /// New implementation (Unity-like, PowerShell).
+  // Exact same hardware classes as Unity, but using modern PowerShell
+  static Future<String> _unityIdentifier() async {
+    final baseBoardID = await _queryWMI("Win32_BaseBoard", "SerialNumber");
+    final biosID = await _queryWMI("Win32_ComputerSystemProduct", "UUID");
+    final processorID =
+        await _queryWMI("Win32_Processor", "ProcessorId", selectFirst: true);
+    final diskDriveID = await _runPowerShellQuery(
         "Get-CimInstance Win32_DiskDrive | Where-Object {\$_.MediaType -eq 'Fixed hard disk media'} | Select-Object -First 1 -ExpandProperty SerialNumber -ErrorAction SilentlyContinue");
+    final osNumber = await _queryWMI("Win32_OperatingSystem", "SerialNumber");
+
+    final all = baseBoardID + biosID + processorID + diskDriveID + osNumber;
+    if (all.isNotEmpty) {
+      return sha256.convert(utf8.encode(all)).toString();
+    }
+    return "";
   }
 
-  /// Win32_OperatingSystem::SerialNumber
-  static Future<String> _getOSSerial() async {
-    return _queryWMI("Win32_OperatingSystem", "SerialNumber");
+  /// Final fallback: MachineGuid from registry
+  static Future<String> _machineGuidFallback() async {
+    try {
+      final result = await Process.run(
+        "reg",
+        ["query", r"HKLM\SOFTWARE\Microsoft\Cryptography", "/v", "MachineGuid"],
+        runInShell: true,
+      );
+
+      if (result.exitCode == 0) {
+        final output = result.stdout.toString();
+        final match = RegExp(r"MachineGuid\s+REG_SZ\s+([a-fA-F0-9\-]+)")
+            .firstMatch(output);
+        if (match != null) {
+          return sha256.convert(utf8.encode(match.group(1)!)).toString();
+        }
+      }
+    } catch (e) {
+      _logger.warning("MachineGuid fallback failed: $e");
+    }
+    // As absolute last resort: random UUID (not recommended for persistence)
+    return sha256
+        .convert(utf8.encode(DateTime.now().toIso8601String()))
+        .toString();
   }
 
-  /// Generic WMI query helper using PowerShell Get-CimInstance
+  // --- Helpers for legacy ---
+  static Future<String> _fetchWinID(
+      String executable, List<String> arguments, String regExpSource) async {
+    String id = "";
+    try {
+      final process = await Process.start(executable, arguments,
+          mode: ProcessStartMode.detachedWithStdio);
+      final result = await process.stdout.transform(utf8.decoder).toList();
+      for (var element in result) {
+        final item = element.toLowerCase().replaceAll(
+              RegExp("\r|\n|\\s|$regExpSource"),
+              "",
+            );
+        if (item.isNotEmpty) id += item;
+      }
+    } catch (_) {}
+    return id;
+  }
+
+  // --- Helpers for new ---
   static Future<String> _queryWMI(String className, String property,
       {bool selectFirst = false}) async {
     final command = selectFirst
@@ -100,11 +152,10 @@ class WindowsUDID {
       );
 
       if (result.exitCode == 0) {
-        String output = result.stdout.toString();
+        String output = result.stdout.toString().trim();
 
         // Clean the output similar to original code, but more carefully
         output = output
-            .trim()
             .replaceAll('\r', '')
             .replaceAll('\n', ' ')
             .replaceAll(RegExp(r'\s+'), ' ') // Multiple spaces to single space
@@ -125,45 +176,5 @@ class WindowsUDID {
       _logger.warning("PowerShell WMI query failed: $command, Error: $e");
     }
     return "";
-  }
-
-  /// Fallback method that uses Windows MachineGuid if Unity approach fails completely
-  static Future<String> uniqueIdentifierWithFallback() async {
-    final unityId = await uniqueIdentifier();
-
-    // If Unity method produced a hash of empty string, use MachineGuid as fallback
-    final emptyHash = sha256.convert(utf8.encode("")).toString();
-    if (unityId == emptyHash) {
-      _logger.warning("Unity method failed, falling back to MachineGuid");
-
-      try {
-        final result = await Process.run(
-          "reg",
-          [
-            "query",
-            r"HKLM\SOFTWARE\Microsoft\Cryptography",
-            "/v",
-            "MachineGuid"
-          ],
-          runInShell: true,
-        );
-
-        if (result.exitCode == 0) {
-          final output = result.stdout.toString();
-          final match = RegExp(r"MachineGuid\s+REG_SZ\s+([a-fA-F0-9\-]+)")
-              .firstMatch(output);
-          if (match != null) {
-            final machineGuid = match.group(1)?.trim() ?? "";
-            if (machineGuid.isNotEmpty) {
-              return sha256.convert(utf8.encode(machineGuid)).toString();
-            }
-          }
-        }
-      } catch (e) {
-        _logger.severe("Fallback MachineGuid also failed: $e");
-      }
-    }
-
-    return unityId;
   }
 }
