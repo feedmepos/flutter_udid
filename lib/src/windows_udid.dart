@@ -70,14 +70,14 @@ class WindowsUDID {
   }
 
   /// New implementation (Unity-like, PowerShell).
-  // Exact same hardware classes as Unity, but using modern PowerShell
+  /// Exact same hardware classes as Unity, but using modern PowerShell
   static Future<String> _unityIdentifier() async {
     final baseBoardID = await _queryWMI("Win32_BaseBoard", "SerialNumber");
     final biosID = await _queryWMI("Win32_ComputerSystemProduct", "UUID");
     final processorID =
         await _queryWMI("Win32_Processor", "ProcessorId", selectFirst: true);
-    final diskDriveID = await _runPowerShellQuery(
-        "Get-CimInstance Win32_DiskDrive | Where-Object {\$_.MediaType -eq 'Fixed hard disk media'} | Select-Object -First 1 -ExpandProperty SerialNumber -ErrorAction SilentlyContinue");
+    final diskDriveID = await _queryWMI("Win32_DiskDrive", "SerialNumber",
+        selectFirst: true, whereClause: "MediaType = 'Fixed hard disk media'");
     final osNumber = await _queryWMI("Win32_OperatingSystem", "SerialNumber");
 
     final all = baseBoardID + biosID + processorID + diskDriveID + osNumber;
@@ -88,6 +88,7 @@ class WindowsUDID {
   }
 
   /// Final fallback: MachineGuid from registry
+  /// This provides a stable, deterministic identifier when hardware queries fail
   static Future<String> _machineGuidFallback() async {
     try {
       final result = await Process.run(
@@ -105,12 +106,16 @@ class WindowsUDID {
         }
       }
     } catch (e) {
-      _logger.warning("MachineGuid fallback failed: $e");
+      _logger.severe("MachineGuid fallback failed: $e");
     }
-    // As absolute last resort: random UUID (not recommended for persistence)
-    return sha256
-        .convert(utf8.encode(DateTime.now().toIso8601String()))
-        .toString();
+
+    /// Use hostname as final deterministic fallback instead of timestamp
+    /// This ensures the same device always gets the same UDID
+    _logger.severe(
+        "All Windows UDID methods failed. Using hostname as final deterministic fallback.");
+    final fallbackInput =
+        "${Platform.localHostname}-${Platform.operatingSystem}-${Platform.operatingSystemVersion}";
+    return sha256.convert(utf8.encode(fallbackInput)).toString();
   }
 
   // --- Helpers for legacy ---
@@ -133,11 +138,22 @@ class WindowsUDID {
   }
 
   // --- Helpers for new ---
+  /// Generic WMI query helper using PowerShell Get-CimInstance
+  /// Fixed: Added whereClause parameter for consistent filtering
   static Future<String> _queryWMI(String className, String property,
-      {bool selectFirst = false}) async {
-    final command = selectFirst
-        ? "Get-CimInstance $className | Select-Object -First 1 -ExpandProperty $property -ErrorAction SilentlyContinue"
-        : "Get-CimInstance $className | Select-Object -ExpandProperty $property -ErrorAction SilentlyContinue";
+      {bool selectFirst = false, String? whereClause}) async {
+    String command = "Get-CimInstance $className";
+
+    if (whereClause != null) {
+      command += " | Where-Object {$whereClause}";
+    }
+
+    if (selectFirst) {
+      command += " | Select-Object -First 1";
+    }
+
+    command +=
+        " | Select-Object -ExpandProperty $property -ErrorAction SilentlyContinue";
 
     return _runPowerShellQuery(command);
   }
