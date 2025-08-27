@@ -76,8 +76,12 @@ class WindowsUDID {
     final biosID = await _queryWMI("Win32_ComputerSystemProduct", "UUID");
     final processorID =
         await _queryWMI("Win32_Processor", "ProcessorId", selectFirst: true);
-    final diskDriveID = await _queryWMI("Win32_DiskDrive", "SerialNumber",
-        selectFirst: true, whereClause: "MediaType = 'Fixed hard disk media'");
+    final diskDriveID = await _queryWMI(
+      "Win32_DiskDrive",
+      "SerialNumber",
+      selectFirst: true,
+      whereClause: r"$_.MediaType -eq 'Fixed hard disk media'",
+    );
     final osNumber = await _queryWMI("Win32_OperatingSystem", "SerialNumber");
 
     final all = baseBoardID + biosID + processorID + diskDriveID + osNumber;
@@ -139,13 +143,16 @@ class WindowsUDID {
 
   // --- Helpers for new ---
   /// Generic WMI query helper using PowerShell Get-CimInstance
-  /// Fixed: Added whereClause parameter for consistent filtering
-  static Future<String> _queryWMI(String className, String property,
-      {bool selectFirst = false, String? whereClause}) async {
+  static Future<String> _queryWMI(
+    String className,
+    String property, {
+    bool selectFirst = false,
+    String? whereClause,
+  }) async {
     String command = "Get-CimInstance $className";
 
     if (whereClause != null) {
-      command += " | Where-Object {$whereClause}";
+      command += " | Where-Object { $whereClause }";
     }
 
     if (selectFirst) {
