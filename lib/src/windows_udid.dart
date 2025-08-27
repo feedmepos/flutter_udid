@@ -1,122 +1,203 @@
 import "dart:convert";
 import "dart:io";
-
 import "package:crypto/crypto.dart";
 import "package:logging/logging.dart";
 
-// Source https://gist.github.com/wangbax/602458b510339d08d2fdc45b4bb78e4d
-// Device Manager
+/// Unity-compatible Windows UDID implementation
+/// Replicates Unity's SystemInfo.deviceUniqueIdentifier for Windows Standalone
 class WindowsUDID {
   WindowsUDID._privateConstructor();
 
-  /// cache uniqueId
   static String? _uniqueId;
+  static final _logger = Logger("flutter_udid");
 
-  /// A unique device identifier.
-  ///
-  /// Refer[Unity deviceUniqueIdentifier](https://docs.unity3d.com/ScriptReference/SystemInfo-deviceUniqueIdentifier.html)
+  /// Returns a stable unique ID.
+  /// Priority:
+  /// 1. Legacy WMIC (backward-compatible with old devices)
+  /// 2. Unity-compatible PowerShell implementation
+  /// 3. MachineGuid registry (final fallback)
   static Future<String> uniqueIdentifier() async {
-    final uniqueId = _uniqueId;
-    if (uniqueId != null && uniqueId.isNotEmpty) {
-      return uniqueId;
+    if (_uniqueId != null && _uniqueId!.isNotEmpty) {
+      return _uniqueId!;
     }
-    // fetch ids in windows
-    final baseBoardID = await _winBaseBoardID();
-    final biosID = await _winBiosID();
-    final processorID = await _winProcessorID();
-    final diskDriveID = await _winDiskDrive();
-    final osNumber = await _winOSNumber();
-    // sha256 generates a unique id, using String.hashCode directly is too easy to collide
-    final all = baseBoardID + biosID + processorID + diskDriveID + osNumber;
-    final uID = sha256.convert(utf8.encode(all)).toString();
-    Future.delayed(const Duration(seconds: 2), () {
-      Logger("flutter_udid").info("baseBoard: $baseBoardID biosID: $biosID "
-          "processorID: $processorID diskDriveID: $diskDriveID "
-          "osNumber: $osNumber uID: $uID");
-    });
-    _uniqueId = uID;
+
+    // --- OLD IMPLEMENTATION (wmic) ---
+    final legacyId = await _legacyIdentifier();
+    if (legacyId.isNotEmpty) {
+      _logger.info("Using legacy UDID (backward-compatible).");
+      _uniqueId = legacyId;
+      return _uniqueId!;
+    }
+
+    // --- NEW IMPLEMENTATION (PowerShell/Unity style) ---
+    final unityId = await _unityIdentifier();
+    if (unityId.isNotEmpty) {
+      _logger.info("Using Unity-compatible UDID (new).");
+      _uniqueId = unityId;
+      return _uniqueId!;
+    }
+
+    // --- FINAL FALLBACK: MachineGuid ---
+    final guid = await _machineGuidFallback();
+    _logger.warning(
+        "Both legacy & Unity UDID failed. Using MachineGuid fallback.");
+    _uniqueId = guid;
     return _uniqueId!;
   }
 
-  /// windows `Win32_BaseBoard::SerialNumber`
-  ///
-  /// cmd: `wmic baseboard get SerialNumber`
-  static Future<String> _winBaseBoardID() async {
-    return _fetchWinID(
-      "wmic",
-      ["baseboard", "get", "serialnumber"],
-      "serialnumber",
-    );
+  /// Original implementation (matches bb0ad9... style IDs).
+  static Future<String> _legacyIdentifier() async {
+    try {
+      final baseBoardID = await _fetchWinID(
+          "wmic", ["baseboard", "get", "serialnumber"], "serialnumber");
+      final biosID =
+          await _fetchWinID("wmic", ["csproduct", "get", "uuid"], "uuid");
+      final processorID = await _fetchWinID(
+          "wmic", ["cpu", "get", "processorid"], "processorid");
+      final diskDriveID = await _fetchWinID(
+          "wmic", ["diskdrive", "get", "serialnumber"], "serialnumber");
+      final osNumber = await _fetchWinID(
+          "wmic", ["os", "get", "serialnumber"], "serialnumber");
+
+      final all = baseBoardID + biosID + processorID + diskDriveID + osNumber;
+      if (all.isNotEmpty) {
+        return sha256.convert(utf8.encode(all)).toString();
+      }
+    } catch (e) {
+      _logger.warning("Legacy WMIC UDID failed: $e");
+    }
+    return "";
   }
 
-  /// windows `Win32_BIOS::SerialNumber`
-  ///
-  /// cmd: `wmic csproduct get UUID`
-  static Future<String> _winBiosID() async {
-    return _fetchWinID(
-      "wmic",
-      ["csproduct", "get", "uuid"],
-      "uuid",
+  /// New implementation (Unity-like, PowerShell).
+  /// Exact same hardware classes as Unity, but using modern PowerShell
+  static Future<String> _unityIdentifier() async {
+    final baseBoardID = await _queryWMI("Win32_BaseBoard", "SerialNumber");
+    final biosID = await _queryWMI("Win32_ComputerSystemProduct", "UUID");
+    final processorID =
+        await _queryWMI("Win32_Processor", "ProcessorId", selectFirst: true);
+    final diskDriveID = await _queryWMI(
+      "Win32_DiskDrive",
+      "SerialNumber",
+      selectFirst: true,
+      whereClause: r"$_.MediaType -eq 'Fixed hard disk media'",
     );
+    final osNumber = await _queryWMI("Win32_OperatingSystem", "SerialNumber");
+
+    final all = baseBoardID + biosID + processorID + diskDriveID + osNumber;
+    if (all.isNotEmpty) {
+      return sha256.convert(utf8.encode(all)).toString();
+    }
+    return "";
   }
 
-  /// windows `Win32_Processor::UniqueId`
-  ///
-  /// cmd: `wmic baseboard get SerialNumber`
-  static Future<String> _winProcessorID() async {
-    return _fetchWinID(
-      "wmic",
-      ["cpu", "get", "processorid"],
-      "processorid",
-    );
+  /// Final fallback: MachineGuid from registry
+  /// This provides a stable, deterministic identifier when hardware queries fail
+  static Future<String> _machineGuidFallback() async {
+    try {
+      final result = await Process.run(
+        "reg",
+        ["query", r"HKLM\SOFTWARE\Microsoft\Cryptography", "/v", "MachineGuid"],
+        runInShell: true,
+      );
+
+      if (result.exitCode == 0) {
+        final output = result.stdout.toString();
+        final match = RegExp(r"MachineGuid\s+REG_SZ\s+([a-fA-F0-9\-]+)")
+            .firstMatch(output);
+        if (match != null) {
+          return sha256.convert(utf8.encode(match.group(1)!)).toString();
+        }
+      }
+    } catch (e) {
+      _logger.severe("MachineGuid fallback failed: $e");
+    }
+
+    /// Use hostname as final deterministic fallback instead of timestamp
+    /// This ensures the same device always gets the same UDID
+    _logger.severe(
+        "All Windows UDID methods failed. Using hostname as final deterministic fallback.");
+    final fallbackInput =
+        "${Platform.localHostname}-${Platform.operatingSystem}-${Platform.operatingSystemVersion}";
+    return sha256.convert(utf8.encode(fallbackInput)).toString();
   }
 
-  /// windows `Win32_DiskDrive::SerialNumber`
-  ///
-  /// cmd: `wmic diskdrive get SerialNumber`
-  static Future<String> _winDiskDrive() async {
-    return _fetchWinID(
-      "wmic",
-      ["diskdrive", "get", "serialnumber"],
-      "serialnumber",
-    );
-  }
-
-  /// windows `Win32_OperatingSystem::SerialNumber`
-  ///
-  /// cmd: `wmic os get serialnumber`
-  static Future<String> _winOSNumber() async {
-    return _fetchWinID(
-      "wmic",
-      ["os", "get", "serialnumber"],
-      "serialnumber",
-    );
-  }
-
-  /// fetch windows id by cmd line
+  // --- Helpers for legacy ---
   static Future<String> _fetchWinID(
-    String executable,
-    List<String> arguments,
-    String regExpSource,
-  ) async {
+      String executable, List<String> arguments, String regExpSource) async {
     String id = "";
     try {
-      final process = await Process.start(
-        executable,
-        arguments,
-        mode: ProcessStartMode.detachedWithStdio,
-      );
+      final process = await Process.start(executable, arguments,
+          mode: ProcessStartMode.detachedWithStdio);
       final result = await process.stdout.transform(utf8.decoder).toList();
       for (var element in result) {
         final item = element.toLowerCase().replaceAll(
               RegExp("\r|\n|\\s|$regExpSource"),
               "",
             );
-        if (item.isNotEmpty) {
-          id = id + item;
+        if (item.isNotEmpty) id += item;
+      }
+    } catch (_) {}
+    return id;
+  }
+
+  // --- Helpers for new ---
+  /// Generic WMI query helper using PowerShell Get-CimInstance
+  static Future<String> _queryWMI(
+    String className,
+    String property, {
+    bool selectFirst = false,
+    String? whereClause,
+  }) async {
+    String command = "Get-CimInstance $className";
+
+    if (whereClause != null) {
+      command += " | Where-Object { $whereClause }";
+    }
+
+    if (selectFirst) {
+      command += " | Select-Object -First 1";
+    }
+
+    command +=
+        " | Select-Object -ExpandProperty $property -ErrorAction SilentlyContinue";
+
+    return _runPowerShellQuery(command);
+  }
+
+  /// Run PowerShell command and return cleaned output
+  static Future<String> _runPowerShellQuery(String command) async {
+    try {
+      final result = await Process.run(
+        "powershell",
+        ["-NoProfile", "-Command", command],
+        runInShell: true,
+      );
+
+      if (result.exitCode == 0) {
+        String output = result.stdout.toString().trim();
+
+        // Clean the output similar to original code, but more carefully
+        output = output
+            .replaceAll('\r', '')
+            .replaceAll('\n', ' ')
+            .replaceAll(RegExp(r'\s+'), ' ') // Multiple spaces to single space
+            .trim();
+
+        // Filter out common placeholder/empty values
+        if (output.isNotEmpty &&
+            !output.toLowerCase().contains('to be filled') &&
+            !output.toLowerCase().contains('not available') &&
+            !output.toLowerCase().contains('not applicable') &&
+            !output.toLowerCase().contains('none') &&
+            output != '0' &&
+            output != 'null') {
+          return output;
         }
       }
-    } on Exception catch (_) {}
-    return id;
+    } catch (e) {
+      _logger.warning("PowerShell WMI query failed: $command, Error: $e");
+    }
+    return "";
   }
 }
